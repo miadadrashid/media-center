@@ -122,12 +122,10 @@ docker compose logs -f radarr
 
 ## Mobile Apps
 
-Setup generates `mobile-config.txt` with all service URLs (using your LAN IP) and API keys.
-
-- **iOS:** [Ruddarr](https://apps.apple.com/app/ruddarr/id6476240130) — manages Radarr + Sonarr from one app
-- **Android:** nzb360 — manages the full *arr stack
-
-Open `mobile-config.txt` on your phone and copy the URLs/keys into the app.
+Setup generates `mobile-config.txt` with every service URL (using your LAN IP) and API key.
+See **[docs/MOBILE.md](docs/MOBILE.md)** for the full guide — Plex, Overseerr (PWA),
+Ruddarr (iOS), nzb360 (Android), LunaSea (cross-platform), qBittorrent control, and how to
+reach everything when you're off the LAN (Tailscale).
 
 ## Overseerr (Media Requests)
 
