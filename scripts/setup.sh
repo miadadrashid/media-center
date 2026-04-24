@@ -100,6 +100,9 @@ setup_env() {
     warn "Edit $PROJECT_DIR/.env, add VPN credentials, and re-run."
     exit 1
   fi
+
+  # Detect Plex on host and update .env idempotently
+  detect_plex
 }
 
 # ==============================================================================
@@ -459,8 +462,17 @@ configure_lidarr() {
     return
   fi
 
+  # Lidarr's rootfolder POST requires defaultQualityProfileId + defaultMetadataProfileId
+  # (Radarr/Sonarr don't). Fetch the first of each from the live config.
+  local lidarr_qp lidarr_mp
+  lidarr_qp="$(api_get "http://localhost:8686/api/v1/qualityprofile"  "$LIDARR_API_KEY" \
+              | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)"
+  lidarr_mp="$(api_get "http://localhost:8686/api/v1/metadataprofile" "$LIDARR_API_KEY" \
+              | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)"
+  lidarr_qp="${lidarr_qp:-1}"; lidarr_mp="${lidarr_mp:-1}"
+
   api_post "http://localhost:8686/api/v1/rootfolder" "$LIDARR_API_KEY" \
-    '{"path":"/data/media/music","name":"Music"}'
+    "{\"path\":\"/data/media/music\",\"name\":\"Music\",\"defaultQualityProfileId\":$lidarr_qp,\"defaultMetadataProfileId\":$lidarr_mp,\"defaultMonitorOption\":\"all\",\"defaultNewItemMonitorOption\":\"all\",\"defaultTags\":[]}"
   ok "Lidarr root folder: /data/media/music"
 
   api_post "http://localhost:8686/api/v1/downloadclient" "$LIDARR_API_KEY" \
@@ -713,19 +725,76 @@ configure_overseerr() {
   rm -f "$cookie_file"
 }
 
+detect_lan_ip() {
+  local ip=""
+  case "$(uname -s)" in
+    Darwin)
+      ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+      ;;
+    Linux)
+      ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      # Git Bash / Cygwin on Windows. Windows `ipconfig` outputs UTF-16 and isn't
+      # `ipconfig getifaddr`-compatible, so call PowerShell for a clean IPv4.
+      ip="$(powershell.exe -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 -AddressState Preferred | Where-Object { \$_.InterfaceAlias -notmatch 'Loopback|vEthernet|WSL|Docker' -and \$_.IPAddress -notmatch '^(169\.254|127\.)' } | Sort-Object InterfaceMetric | Select-Object -First 1).IPAddress" 2>/dev/null | tr -d '\r\n')"
+      ;;
+  esac
+  echo "$ip"
+}
+
+detect_plex() {
+  # Idempotent: probe localhost:32400 for a running Plex Media Server. If found,
+  # update PLEX_URL to use the LAN IP (so containers can reach it) and pull the
+  # auth token from the host's Preferences.xml. Always overwrites detected values
+  # (matching extract_api_keys' behavior). Silently skips if Plex isn't on the host.
+  if ! curl -sf --max-time 3 http://localhost:32400/identity >/dev/null 2>&1; then
+    info "No Plex on localhost:32400 — leaving PLEX_URL/PLEX_TOKEN as-is"
+    return
+  fi
+
+  local lan_ip prefs="" plex_url plex_token=""
+  lan_ip="$(detect_lan_ip)"
+  plex_url="http://${lan_ip:-host.docker.internal}:32400"
+
+  # Windows stores PlexOnlineToken in the registry; macOS/Linux use Preferences.xml.
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      plex_token="$(powershell.exe -NoProfile -Command "(Get-ItemProperty 'HKCU:\\Software\\Plex, Inc.\\Plex Media Server' -Name PlexOnlineToken -ErrorAction SilentlyContinue).PlexOnlineToken" 2>/dev/null | tr -d '\r\n')"
+      ;;
+    Darwin)
+      prefs="$HOME/Library/Application Support/Plex Media Server/Preferences.xml"
+      ;;
+    Linux)
+      for p in \
+          "$HOME/.config/Plex Media Server/Preferences.xml" \
+          "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Preferences.xml"; do
+        if [[ -f "$p" ]]; then prefs="$p"; break; fi
+      done
+      ;;
+  esac
+  if [[ -z "$plex_token" && -n "$prefs" && -f "$prefs" ]]; then
+    plex_token="$(sed -n 's/.*PlexOnlineToken="\([^"]*\)".*/\1/p' "$prefs" | head -1)"
+  fi
+
+  sed -i.bak "s|^PLEX_URL=.*|PLEX_URL=$plex_url|" "$PROJECT_DIR/.env"
+  ok "Plex detected on host: $plex_url"
+  if [[ -n "$plex_token" ]]; then
+    sed -i.bak "s|^PLEX_TOKEN=.*|PLEX_TOKEN=$plex_token|" "$PROJECT_DIR/.env"
+    ok "Plex token extracted from host"
+  else
+    warn "Plex running but token not readable from registry/Preferences.xml"
+    warn "Set PLEX_TOKEN manually in .env to enable Overseerr auto-wire"
+  fi
+  rm -f "$PROJECT_DIR/.env.bak"
+  set -a; source "$PROJECT_DIR/.env"; set +a
+}
+
 generate_mobile_config() {
   info "Generating mobile configuration..."
 
-  # Detect LAN IP
-  local lan_ip=""
-  if command -v ipconfig &>/dev/null; then
-    # macOS
-    lan_ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")"
-  fi
-  if [[ -z "$lan_ip" ]] && command -v hostname &>/dev/null; then
-    # Linux
-    lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  fi
+  local lan_ip
+  lan_ip="$(detect_lan_ip)"
   if [[ -z "$lan_ip" ]]; then
     lan_ip="YOUR_SERVER_IP"
     warn "Could not detect LAN IP — edit mobile-config.txt with your server IP"
@@ -776,6 +845,9 @@ qBittorrent:
   URL:     http://$lan_ip:8085
   User:    ${QB_USERNAME:-admin}
   Pass:    ${QB_PASSWORD:-mediaCenter!2026}
+
+Plex (host, outside Docker):
+  URL:     http://$lan_ip:32400/web
 
 --- Mobile App Setup ---
 
