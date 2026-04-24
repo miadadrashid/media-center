@@ -120,6 +120,19 @@ docker compose --profile full pull && docker compose --profile full up -d
 docker compose logs -f radarr
 ```
 
+## Mobile Apps
+
+Setup generates `mobile-config.txt` with all service URLs (using your LAN IP) and API keys.
+
+- **iOS:** [Ruddarr](https://apps.apple.com/app/ruddarr/id6476240130) — manages Radarr + Sonarr from one app
+- **Android:** nzb360 — manages the full *arr stack
+
+Open `mobile-config.txt` on your phone and copy the URLs/keys into the app.
+
+## Overseerr (Media Requests)
+
+Overseerr (standard+ tier) provides a Netflix-like UI for browsing and requesting movies/TV shows. If `PLEX_TOKEN` is set in `.env`, setup.sh auto-configures it with Radarr + Sonarr. Otherwise, complete the setup wizard at http://localhost:5055.
+
 ## Notes
 
 - **Plex** runs on the host (not in Docker) for GPU access. Point it at `$DATA_PATH/media/`.

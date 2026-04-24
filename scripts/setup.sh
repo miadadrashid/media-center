@@ -22,12 +22,15 @@ err()   { echo -e "${RED}[ERROR]${NC} $*"; }
 # Phase 1: Preflight
 # ==============================================================================
 preflight() {
-  if [[ "$TIER" != "minimal" && "$TIER" != "standard" && "$TIER" != "full" ]]; then
-    echo "Usage: $0 [minimal|standard|full]"
+  if [[ "$TIER" != "minimal" && "$TIER" != "standard" && "$TIER" != "full" && "$TIER" != "push-env" && "$TIER" != "pull-env" ]]; then
+    echo "Usage: $0 [minimal|standard|full|push-env|pull-env]"
     echo ""
     echo "  minimal   — Movies & TV (Radarr, Sonarr)"
     echo "  standard  — + Subtitles, Music, Monitoring, Requests"
     echo "  full      — + Books, Audiobooks, Comics, Automation, Dashboard"
+    echo ""
+    echo "  push-env  — Save .env to a private GitHub Gist"
+    echo "  pull-env  — Restore .env from GitHub Gist"
     exit 1
   fi
 
@@ -613,6 +616,187 @@ configure_prowlarr() {
   add_indexer "The Pirate Bay" "thepiratebay" "https://thepiratebay.org/" ""
 }
 
+configure_overseerr() {
+  info "Configuring Overseerr..."
+
+  if [[ -z "${PLEX_TOKEN:-}" ]]; then
+    warn "PLEX_TOKEN not set in .env — skipping Overseerr auto-setup"
+    warn "Set PLEX_TOKEN and re-run, or configure Overseerr manually at http://localhost:5055"
+    return
+  fi
+
+  # Check if already configured
+  local existing
+  existing="$(curl -sf http://localhost:5055/api/v1/settings/radarr 2>/dev/null || echo "[]")"
+  if echo "$existing" | grep -q '"hostname"'; then
+    ok "Overseerr already configured, skipping"
+    return
+  fi
+
+  # 1. Authenticate with Plex token — get session cookie
+  local cookie_file="/tmp/overseerr_cookies_$$"
+  curl -sf -c "$cookie_file" -X POST http://localhost:5055/api/v1/auth/plex \
+    -H "Content-Type: application/json" \
+    -d "{\"authToken\":\"$PLEX_TOKEN\"}" >/dev/null 2>&1
+  local os_cookie
+  os_cookie="$(grep connect.sid "$cookie_file" 2>/dev/null | awk '{print $NF}')"
+
+  if [[ -z "$os_cookie" ]]; then
+    warn "Overseerr Plex auth failed — check PLEX_TOKEN"
+    rm -f "$cookie_file"
+    return
+  fi
+  ok "Overseerr Plex auth successful"
+
+  # 2. Get Radarr quality profile (first one)
+  local radarr_profiles
+  radarr_profiles="$(api_get "http://localhost:7878/api/v3/qualityprofile" "$RADARR_API_KEY")"
+  local radarr_profile_id radarr_profile_name
+  radarr_profile_id="$(echo "$radarr_profiles" | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)"
+  radarr_profile_name="$(echo "$radarr_profiles" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p' | head -1)"
+  radarr_profile_id="${radarr_profile_id:-1}"
+  radarr_profile_name="${radarr_profile_name:-Any}"
+
+  # 3. Get Sonarr quality profile (first one)
+  local sonarr_profiles
+  sonarr_profiles="$(api_get "http://localhost:8989/api/v3/qualityprofile" "$SONARR_API_KEY")"
+  local sonarr_profile_id sonarr_profile_name
+  sonarr_profile_id="$(echo "$sonarr_profiles" | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)"
+  sonarr_profile_name="$(echo "$sonarr_profiles" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p' | head -1)"
+  sonarr_profile_id="${sonarr_profile_id:-1}"
+  sonarr_profile_name="${sonarr_profile_name:-Any}"
+
+  # 4. Add Radarr to Overseerr
+  curl -sf -o /dev/null -b "connect.sid=$os_cookie" \
+    -X POST http://localhost:5055/api/v1/settings/radarr \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"name\":\"Radarr\",
+      \"hostname\":\"radarr\",
+      \"port\":7878,
+      \"apiKey\":\"$RADARR_API_KEY\",
+      \"useSsl\":false,
+      \"activeProfileId\":$radarr_profile_id,
+      \"activeProfileName\":\"$radarr_profile_name\",
+      \"activeDirectory\":\"/data/media/movies\",
+      \"is4k\":false,
+      \"minimumAvailability\":\"released\",
+      \"isDefault\":true
+    }" 2>/dev/null || true
+  ok "Overseerr -> Radarr (profile: $radarr_profile_name)"
+
+  # 5. Add Sonarr to Overseerr
+  curl -sf -o /dev/null -b "connect.sid=$os_cookie" \
+    -X POST http://localhost:5055/api/v1/settings/sonarr \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"name\":\"Sonarr\",
+      \"hostname\":\"sonarr\",
+      \"port\":8989,
+      \"apiKey\":\"$SONARR_API_KEY\",
+      \"useSsl\":false,
+      \"activeProfileId\":$sonarr_profile_id,
+      \"activeProfileName\":\"$sonarr_profile_name\",
+      \"activeDirectory\":\"/data/media/tv\",
+      \"is4k\":false,
+      \"enableSeasonFolders\":true,
+      \"isDefault\":true
+    }" 2>/dev/null || true
+  ok "Overseerr -> Sonarr (profile: $sonarr_profile_name)"
+
+  # 6. Initialize Overseerr (mark setup complete)
+  curl -sf -o /dev/null -b "connect.sid=$os_cookie" \
+    -X POST http://localhost:5055/api/v1/settings/initialize \
+    -H "Content-Type: application/json" 2>/dev/null || true
+  ok "Overseerr setup initialized"
+
+  rm -f "$cookie_file"
+}
+
+generate_mobile_config() {
+  info "Generating mobile configuration..."
+
+  # Detect LAN IP
+  local lan_ip=""
+  if command -v ipconfig &>/dev/null; then
+    # macOS
+    lan_ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")"
+  fi
+  if [[ -z "$lan_ip" ]] && command -v hostname &>/dev/null; then
+    # Linux
+    lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  if [[ -z "$lan_ip" ]]; then
+    lan_ip="YOUR_SERVER_IP"
+    warn "Could not detect LAN IP — edit mobile-config.txt with your server IP"
+  fi
+
+  cat > "$PROJECT_DIR/mobile-config.txt" << MOBILEEOF
+============================================================
+  Media Center — Mobile App Configuration
+============================================================
+
+Server IP: $lan_ip
+
+--- Services ---
+
+Radarr (Movies):
+  URL:     http://$lan_ip:7878
+  API Key: ${RADARR_API_KEY:-not yet available}
+
+Sonarr (TV):
+  URL:     http://$lan_ip:8989
+  API Key: ${SONARR_API_KEY:-not yet available}
+MOBILEEOF
+
+  if [[ "$TIER" == "standard" || "$TIER" == "full" ]]; then
+    cat >> "$PROJECT_DIR/mobile-config.txt" << MOBILEEOF
+
+Lidarr (Music):
+  URL:     http://$lan_ip:8686
+  API Key: ${LIDARR_API_KEY:-not yet available}
+
+Overseerr (Requests):
+  URL:     http://$lan_ip:5055
+MOBILEEOF
+  fi
+
+  if [[ "$TIER" == "full" ]]; then
+    cat >> "$PROJECT_DIR/mobile-config.txt" << MOBILEEOF
+
+Readarr (Books):
+  URL:     http://$lan_ip:8787
+  API Key: ${READARR_API_KEY:-not yet available}
+MOBILEEOF
+  fi
+
+  cat >> "$PROJECT_DIR/mobile-config.txt" << MOBILEEOF
+
+qBittorrent:
+  URL:     http://$lan_ip:8085
+  User:    ${QB_USERNAME:-admin}
+  Pass:    ${QB_PASSWORD:-mediaCenter!2026}
+
+--- Mobile App Setup ---
+
+iOS: Download "Ruddarr" from the App Store
+  https://apps.apple.com/app/ruddarr/id6476240130
+  - Open Ruddarr -> Add Instance
+  - Enter the Radarr or Sonarr URL and API Key from above
+  - Supports multiple instances (add both Radarr and Sonarr)
+
+Android: Download "nzb360" from the Play Store
+  - Open nzb360 -> Add Server
+  - Enter each service URL and API Key from above
+
+============================================================
+  Generated by setup.sh on $(date '+%Y-%m-%d %H:%M')
+============================================================
+MOBILEEOF
+
+  ok "Mobile config saved to mobile-config.txt"
+}
+
 configure_qbittorrent() {
   info "Configuring qBittorrent (via gluetun container)..."
 
@@ -726,19 +910,96 @@ verify() {
   [[ "$TIER" == "full" ]] && echo "  - Readarr root folder + download client"
   echo "  - Prowlarr connected to all *arr apps"
   echo "  - FlareSolverr proxy in Prowlarr"
+  if [[ "$TIER" == "standard" || "$TIER" == "full" ]]; then
+    if [[ -n "${PLEX_TOKEN:-}" ]]; then
+      echo "  - Overseerr wired to Radarr + Sonarr"
+    else
+      echo "  - Overseerr skipped (set PLEX_TOKEN to auto-configure)"
+    fi
+  fi
   echo "  - API keys saved to .env"
+  echo "  - Mobile config saved to mobile-config.txt"
 
   echo ""
-  echo "Remaining manual step:"
-  echo "  Open Prowlarr (http://localhost:9696) and add your indexers."
-  echo "  They will automatically sync to all connected *arr apps."
+  echo "Remaining manual steps:"
+  echo "  1. Open Prowlarr (http://localhost:9696) and add your indexers."
+  echo "     They will automatically sync to all connected *arr apps."
+  if [[ "$TIER" == "standard" || "$TIER" == "full" ]] && [[ -z "${PLEX_TOKEN:-}" ]]; then
+    echo "  2. Open Overseerr (http://localhost:5055) and complete setup wizard."
+  fi
   echo ""
+  echo "Mobile setup:"
+  echo "  See mobile-config.txt for Ruddarr (iOS) / nzb360 (Android) setup."
+  echo ""
+}
+
+# ==============================================================================
+# Env Backup: push/pull .env via private GitHub Gist
+# ==============================================================================
+GIST_DESC="media-center-env-backup"
+
+env_push() {
+  if ! command -v gh &>/dev/null; then
+    err "gh CLI is required. Install: https://cli.github.com/"
+    exit 1
+  fi
+
+  if [[ ! -f "$PROJECT_DIR/.env" ]]; then
+    err "No .env file to push."
+    exit 1
+  fi
+
+  # Check for existing gist
+  local gist_id
+  gist_id="$(gh gist list --limit 100 2>/dev/null | grep "$GIST_DESC" | awk '{print $1}' | head -1 || true)"
+
+  if [[ -n "$gist_id" ]]; then
+    # Update existing gist
+    gh gist edit "$gist_id" -a "$PROJECT_DIR/.env" 2>/dev/null
+    ok "Updated .env in gist $gist_id"
+  else
+    # Create new secret gist (secret is the default, no flag needed)
+    local gist_url
+    gist_url="$(gh gist create -d "$GIST_DESC" "$PROJECT_DIR/.env" 2>&1)"
+    ok "Created secret gist: $gist_url"
+  fi
+}
+
+env_pull() {
+  if ! command -v gh &>/dev/null; then
+    err "gh CLI is required. Install: https://cli.github.com/"
+    exit 1
+  fi
+
+  local gist_id
+  gist_id="$(gh gist list --limit 100 2>/dev/null | grep "$GIST_DESC" | awk '{print $1}' | head -1 || true)"
+
+  if [[ -z "$gist_id" ]]; then
+    err "No saved .env found. Run './scripts/setup.sh push-env' first."
+    exit 1
+  fi
+
+  # Pull the .env file from gist
+  gh gist view "$gist_id" -r --filename .env > "$PROJECT_DIR/.env" 2>/dev/null
+  ok "Pulled .env from gist $gist_id"
 }
 
 # ==============================================================================
 # Main
 # ==============================================================================
 main() {
+  # Handle push-env / pull-env commands
+  case "${TIER}" in
+    push-env)
+      env_push
+      exit 0
+      ;;
+    pull-env)
+      env_pull
+      exit 0
+      ;;
+  esac
+
   echo ""
   echo -e "${BLUE}=== Media Center Setup (tier: $TIER) ===${NC}"
   echo ""
@@ -754,7 +1015,9 @@ main() {
   [[ "$TIER" == "standard" || "$TIER" == "full" ]] && configure_lidarr
   [[ "$TIER" == "full" ]] && configure_readarr
   configure_prowlarr
+  [[ "$TIER" == "standard" || "$TIER" == "full" ]] && configure_overseerr
   configure_qbittorrent
+  generate_mobile_config
   verify
 }
 
