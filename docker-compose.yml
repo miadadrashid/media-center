@@ -1,0 +1,272 @@
+services:
+  # ============================================================================
+  # INFRASTRUCTURE — always starts (no profile required)
+  # ============================================================================
+
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "8085:8080"       # qBittorrent Web UI
+      - "6881:6881"       # qBittorrent listening port
+      - "6881:6881/udp"
+    environment:
+      - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
+      - VPN_TYPE=${VPN_TYPE}
+      - OPENVPN_USER=${OPENVPN_USER}
+      - OPENVPN_PASSWORD=${OPENVPN_PASSWORD}
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY:-}
+      - SERVER_COUNTRIES=${SERVER_COUNTRIES:-}
+      - EXPRESSVPN_ACTIVATION_CODE=${EXPRESSVPN_ACTIVATION_CODE:-}
+    volumes:
+      - ${APPDATA_PATH}/gluetun:/gluetun
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: service:gluetun
+    depends_on:
+      - gluetun
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - UMASK=${UMASK}
+      - WEBUI_PORT=8080
+    volumes:
+      - ${APPDATA_PATH}/qbittorrent:/config
+      - ${DATA_PATH}/torrents:/data/torrents
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    ports:
+      - "9696:9696"
+    volumes:
+      - ${APPDATA_PATH}/prowlarr:/config
+    restart: unless-stopped
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=info
+      - TZ=${TZ}
+    ports:
+      - "8191:8191"
+    restart: unless-stopped
+
+  # ============================================================================
+  # MINIMAL — Movies & TV (--profile minimal)
+  # ============================================================================
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    profiles: [minimal, standard, full]
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    ports:
+      - "7878:7878"
+    volumes:
+      - ${APPDATA_PATH}/radarr:/config
+      - ${DATA_PATH}:/data
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    profiles: [minimal, standard, full]
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    ports:
+      - "8989:8989"
+    volumes:
+      - ${APPDATA_PATH}/sonarr:/config
+      - ${DATA_PATH}:/data
+    restart: unless-stopped
+
+  # ============================================================================
+  # STANDARD — + Subtitles, Music, Monitoring, Requests (--profile standard)
+  # ============================================================================
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    profiles: [standard, full]
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    ports:
+      - "6767:6767"
+    volumes:
+      - ${APPDATA_PATH}/bazarr:/config
+      - ${DATA_PATH}:/data
+    restart: unless-stopped
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    profiles: [standard, full]
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    ports:
+      - "8686:8686"
+    volumes:
+      - ${APPDATA_PATH}/lidarr:/config
+      - ${DATA_PATH}:/data
+    restart: unless-stopped
+
+  overseerr:
+    image: lscr.io/linuxserver/overseerr:latest
+    container_name: overseerr
+    profiles: [standard, full]
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    ports:
+      - "5055:5055"
+    volumes:
+      - ${APPDATA_PATH}/overseerr:/config
+    restart: unless-stopped
+
+  tautulli:
+    image: lscr.io/linuxserver/tautulli:latest
+    container_name: tautulli
+    profiles: [standard, full]
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    ports:
+      - "8181:8181"
+    volumes:
+      - ${APPDATA_PATH}/tautulli:/config
+    restart: unless-stopped
+
+  # ============================================================================
+  # FULL — + Books, Comics, Audiobooks, Automation, Dashboard (--profile full)
+  # ============================================================================
+
+  readarr:
+    image: lscr.io/linuxserver/readarr:develop
+    container_name: readarr
+    profiles: [full]
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    ports:
+      - "8787:8787"
+    volumes:
+      - ${APPDATA_PATH}/readarr:/config
+      - ${DATA_PATH}:/data
+    restart: unless-stopped
+
+  audiobookshelf:
+    image: advplyr/audiobookshelf:latest
+    container_name: audiobookshelf
+    profiles: [full]
+    environment:
+      - TZ=${TZ}
+    ports:
+      - "13378:80"
+    volumes:
+      - ${APPDATA_PATH}/audiobookshelf/config:/config
+      - ${APPDATA_PATH}/audiobookshelf/metadata:/metadata
+      - ${DATA_PATH}/media/audiobooks:/audiobooks
+    restart: unless-stopped
+
+  calibre-web:
+    image: lscr.io/linuxserver/calibre-web:latest
+    container_name: calibre-web
+    profiles: [full]
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    ports:
+      - "8083:8083"
+    volumes:
+      - ${APPDATA_PATH}/calibre-web:/config
+      - ${DATA_PATH}/media/ebooks:/books
+    restart: unless-stopped
+
+  mylar3:
+    image: lscr.io/linuxserver/mylar3:latest
+    container_name: mylar3
+    profiles: [full]
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+    ports:
+      - "8090:8090"
+    volumes:
+      - ${APPDATA_PATH}/mylar3:/config
+      - ${DATA_PATH}/media/comics:/comics
+      - ${DATA_PATH}/torrents/books:/downloads
+    restart: unless-stopped
+
+  recyclarr:
+    image: ghcr.io/recyclarr/recyclarr:latest
+    container_name: recyclarr
+    profiles: [full]
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ${APPDATA_PATH}/recyclarr:/config
+      - ./recyclarr.yml:/config/recyclarr.yml:ro
+    restart: unless-stopped
+
+  unpackerr:
+    image: golift/unpackerr:latest
+    container_name: unpackerr
+    profiles: [full]
+    environment:
+      - TZ=${TZ}
+      - UN_SONARR_0_URL=http://sonarr:8989
+      - UN_SONARR_0_API_KEY=${SONARR_API_KEY}
+      - UN_RADARR_0_URL=http://radarr:7878
+      - UN_RADARR_0_API_KEY=${RADARR_API_KEY}
+    volumes:
+      - ${DATA_PATH}/torrents:/data/torrents
+    restart: unless-stopped
+
+  homarr:
+    image: ghcr.io/ajnart/homarr:latest
+    container_name: homarr
+    profiles: [full]
+    environment:
+      - TZ=${TZ}
+    ports:
+      - "7575:7575"
+    volumes:
+      - ${APPDATA_PATH}/homarr/configs:/app/data/configs
+      - ${APPDATA_PATH}/homarr/icons:/app/public/icons
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
