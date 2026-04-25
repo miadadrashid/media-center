@@ -23,15 +23,36 @@ work through this guide — most apps just need you to paste one URL + one key.
 All URLs in `mobile-config.txt` are LAN addresses like `http://192.168.4.138:7878`.
 On cellular or someone else's Wi-Fi, those won't reach your server. Pick one:
 
-### Tailscale (recommended — 5 minutes, free, no port forwarding)
+### Tailscale via the Docker stack (recommended — runs as a container, no host install)
 
-1. Install Tailscale on the media-center host: https://tailscale.com/download
-2. Install the Tailscale app on your phone and log in to the same account.
-3. Note your server's tailnet name (`Settings > About` in Tailscale, usually
-   `hostname.tail-xxxxx.ts.net`).
-4. Everywhere this guide says `192.168.4.138`, use the tailnet name instead
-   (e.g. `http://media-center.tail-xxxxx.ts.net:7878`).
-5. Works identically on LAN and cellular. No port forwarding, no DDNS.
+`setup.sh` ships an optional `tailscale` service that joins your tailnet and
+advertises your LAN. Once enabled, every existing LAN URL in
+`mobile-config.txt` works from anywhere — phone reaches `192.168.4.138:7878`
+the same on cellular as it does at home.
+
+1. Sign up at https://tailscale.com/ if you haven't (free for personal use).
+2. Generate an auth key:
+   https://login.tailscale.com/admin/settings/keys → *Generate auth key* →
+   Reusable on, Ephemeral off → copy the `tskey-auth-...` string.
+3. Paste it into `.env` as `TS_AUTHKEY=tskey-auth-...` and re-run
+   `bash scripts/setup.sh <tier>`. The script auto-fills `TS_ROUTES` from
+   your LAN IP, starts the `tailscale` container, and prints its tailnet IP.
+4. **One-time route approval**: open
+   https://login.tailscale.com/admin/machines, find your `mediacenter`
+   host, click *Edit route settings*, approve the advertised subnet.
+5. Install the Tailscale app on your phone and sign in to the same account.
+
+That's it. Use the same `192.168.4.138:PORT` URLs everywhere this guide
+mentions a LAN IP.
+
+#### Native install on the host (alternative)
+
+If you'd rather run Tailscale on the Windows/macOS/Linux host itself
+(skipping the container), just install the Tailscale client from
+https://tailscale.com/download and use the host's tailnet hostname
+(`hostname.tail-xxxxx.ts.net`) in place of `192.168.4.138`. The container
+approach is preferred when you want the entire stack — including remote
+access — to come up from `docker compose down && setup.sh`.
 
 Other options: Cloudflare Tunnel (free, needs a domain), WireGuard on your
 router, or port forwarding + DDNS (not recommended — exposes services to the

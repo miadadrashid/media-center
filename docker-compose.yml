@@ -270,3 +270,36 @@ services:
       - ${APPDATA_PATH}/homarr/icons:/app/public/icons
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
+
+  # ============================================================================
+  # TAILSCALE (--profile tailscale)
+  # Subnet router that joins the host's tailnet and advertises the LAN range,
+  # so any device on the tailnet (phone, laptop) can reach every service via
+  # its existing LAN IP — no per-service config, no public port forwarding.
+  # Enabled automatically by setup.sh when TS_AUTHKEY is set in .env.
+  # ============================================================================
+
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    profiles: [tailscale]
+    hostname: ${TS_HOSTNAME:-mediacenter}
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_HOSTNAME=${TS_HOSTNAME:-mediacenter}
+      - TS_EXTRA_ARGS=--advertise-routes=${TS_ROUTES:-} --accept-dns=false
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - ${APPDATA_PATH}/tailscale:/var/lib/tailscale
+    healthcheck:
+      test: ["CMD", "tailscale", "status", "--peers=false"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    restart: unless-stopped

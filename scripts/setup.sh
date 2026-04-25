@@ -94,6 +94,30 @@ setup_env() {
   source "$PROJECT_DIR/.env"
   set +a
 
+  # Migrate older .env files that predate later additions (Tailscale, etc.)
+  # Append any keys present in .env.example but missing from .env.
+  if [[ -f "$PROJECT_DIR/.env.example" ]]; then
+    local migrated=0
+    while IFS= read -r line; do
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      [[ -z "${line// }" ]] && continue
+      [[ "$line" != *"="* ]] && continue
+      local key="${line%%=*}"
+      if ! grep -q "^${key}=" "$PROJECT_DIR/.env"; then
+        if [[ $migrated -eq 0 ]]; then
+          printf '\n# --- Migrated from .env.example by setup.sh ---\n' >> "$PROJECT_DIR/.env"
+          migrated=1
+        fi
+        # Preserve the default value from .env.example (e.g. TS_HOSTNAME=mediacenter)
+        echo "$line" >> "$PROJECT_DIR/.env"
+        info "Added missing key to .env: $key"
+      fi
+    done < "$PROJECT_DIR/.env.example"
+    if [[ $migrated -eq 1 ]]; then
+      set -a; source "$PROJECT_DIR/.env"; set +a
+    fi
+  fi
+
   # Validate VPN credentials
   if [[ -z "${OPENVPN_USER:-}" && -z "${WIREGUARD_PRIVATE_KEY:-}" && -z "${EXPRESSVPN_ACTIVATION_CODE:-}" ]]; then
     warn "No VPN credentials in .env — gluetun will fail to connect."
@@ -103,6 +127,21 @@ setup_env() {
 
   # Detect Plex on host and update .env idempotently
   detect_plex
+
+  # Auto-fill TS_ROUTES if Tailscale is being enabled but the user didn't set one
+  if [[ -n "${TS_AUTHKEY:-}" && -z "${TS_ROUTES:-}" ]]; then
+    local lan_ip subnet
+    lan_ip="$(detect_lan_ip)"
+    if [[ "$lan_ip" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+      subnet="${BASH_REMATCH[1]}.0/24"
+      sed -i.bak "s|^TS_ROUTES=.*|TS_ROUTES=$subnet|" "$PROJECT_DIR/.env"
+      rm -f "$PROJECT_DIR/.env.bak"
+      ok "Tailscale: auto-detected subnet $subnet (override TS_ROUTES in .env if wrong)"
+      set -a; source "$PROJECT_DIR/.env"; set +a
+    else
+      warn "Tailscale: could not derive subnet from LAN IP — set TS_ROUTES in .env manually"
+    fi
+  fi
 }
 
 # ==============================================================================
@@ -132,6 +171,11 @@ create_dirs() {
     mkdir -p "$APPDATA_PATH"/{readarr,mylar3,calibre-web,recyclarr}
     mkdir -p "$APPDATA_PATH"/audiobookshelf/{config,metadata}
     mkdir -p "$APPDATA_PATH"/homarr/{configs,icons}
+  fi
+
+  # Tailscale (any tier, opt-in via TS_AUTHKEY)
+  if [[ -n "${TS_AUTHKEY:-}" ]]; then
+    mkdir -p "$APPDATA_PATH"/tailscale
   fi
 
   ok "Directories created"
@@ -239,12 +283,28 @@ wait_for_http() {
 start_containers() {
   info "Starting containers (tier: $TIER)..."
   cd "$PROJECT_DIR"
-  $COMPOSE --profile "$TIER" up -d
+
+  # Add the tailscale profile when an auth key is present in .env.
+  local extra_profiles=()
+  if [[ -n "${TS_AUTHKEY:-}" ]]; then
+    extra_profiles+=(--profile tailscale)
+    info "Tailscale enabled (TS_AUTHKEY set; advertising ${TS_ROUTES:-(none)})"
+  fi
+
+  $COMPOSE --profile "$TIER" "${extra_profiles[@]}" up -d
 
   # Wait for gluetun VPN
   if ! wait_for_healthy gluetun 90; then
     warn "Gluetun VPN not healthy — check your VPN credentials in .env"
     warn "Continuing setup (services will work once VPN connects)..."
+  fi
+
+  # Wait for Tailscale if it's part of this run
+  if [[ -n "${TS_AUTHKEY:-}" ]]; then
+    if ! wait_for_healthy tailscale 60; then
+      warn "Tailscale container not healthy yet — check 'docker logs tailscale'"
+      warn "If TS_AUTHKEY was reused/expired, generate a new one and re-run."
+    fi
   fi
 
   # Wait for core services
@@ -946,6 +1006,19 @@ verify() {
     warn "VPN check — Host: $host_ip | Torrent: $qbt_ip"
   fi
 
+  # Tailscale status (only if container is running)
+  if [[ -n "${TS_AUTHKEY:-}" ]] && docker ps --format '{{.Names}}' | grep -q '^tailscale$'; then
+    local ts_ip ts_status
+    ts_ip="$(docker exec tailscale tailscale ip -4 2>/dev/null | head -1 | tr -d '\r\n')"
+    ts_status="$(docker exec tailscale tailscale status --self --peers=false 2>/dev/null | head -1)"
+    if [[ -n "$ts_ip" ]]; then
+      ok "Tailscale: ${TS_HOSTNAME:-mediacenter} → $ts_ip (advertising ${TS_ROUTES:-?})"
+      info "  Approve subnet route once at: https://login.tailscale.com/admin/machines"
+    else
+      warn "Tailscale container running but no IP yet — see 'docker logs tailscale'"
+    fi
+  fi
+
   echo ""
   echo "Service URLs:"
   echo "  qBittorrent:    http://localhost:8085"
@@ -989,6 +1062,9 @@ verify() {
       echo "  - Overseerr skipped (set PLEX_TOKEN to auto-configure)"
     fi
   fi
+  if [[ -n "${TS_AUTHKEY:-}" ]]; then
+    echo "  - Tailscale subnet router (${TS_ROUTES:-?})"
+  fi
   echo "  - API keys saved to .env"
   echo "  - Mobile config saved to mobile-config.txt"
 
@@ -998,6 +1074,10 @@ verify() {
   echo "     They will automatically sync to all connected *arr apps."
   if [[ "$TIER" == "standard" || "$TIER" == "full" ]] && [[ -z "${PLEX_TOKEN:-}" ]]; then
     echo "  2. Open Overseerr (http://localhost:5055) and complete setup wizard."
+  fi
+  if [[ -n "${TS_AUTHKEY:-}" ]]; then
+    echo "  *. Approve the Tailscale subnet route once at:"
+    echo "     https://login.tailscale.com/admin/machines"
   fi
   echo ""
   echo "Mobile setup:"
